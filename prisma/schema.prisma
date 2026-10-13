@@ -1,0 +1,130 @@
+// Prisma schema for the algo-assessment wallet application.
+//
+// Key design points (see DECISIONS.md for full reasoning):
+// - Balances are stored as BigInt cents on Account to avoid floating-point rounding.
+// - Money movement is modeled as a Transfer (one record) + two Transaction ledger
+//   entries (a DEBIT on the source account and a CREDIT on the destination).
+//   This double-entry ledger guarantees every balance change is traceable.
+// - Idempotency is enforced with a unique constraint on Transfer.idempotencyKey.
+//   Concurrent duplicates race on this constraint; the loser rolls back its whole
+//   DB transaction (so no money moves twice) and we return the winner's response.
+// - Category corrections are stored per user and injected into future LLM prompts.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String              @id @default(uuid())
+  email        String              @unique
+  passwordHash String
+  name         String
+  createdAt    DateTime            @default(now())
+  accounts     Account[]
+  corrections  CategoryCorrection[]
+  refreshTokens RefreshToken[]
+}
+
+// Rotating, revocable refresh tokens. Only a SHA-256 hash of the token is
+// stored, so a database leak does not expose usable credentials. Rotation
+// replaces the token on every use; reuse of a revoked token is treated as
+// theft and revokes every token for that user.
+model RefreshToken {
+  id            String    @id @default(uuid())
+  tokenHash     String    @unique
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  replacedById  String?
+  createdAt     DateTime  @default(now())
+  lastUsedAt    DateTime?
+
+  @@index([userId])
+  @@index([tokenHash])
+}
+
+model Account {
+  id           String        @id @default(uuid())
+  userId       String
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name         String        @default("Main")
+  currency     String        @default("USD")
+  // Balance in minor units (cents). BigInt avoids float rounding errors.
+  balance      BigInt        @default(0)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  transactions Transaction[]
+  transfersOut Transfer[]   @relation("TransferSource")
+  transfersIn  Transfer[]   @relation("TransferDest")
+
+  @@index([userId])
+}
+
+model Transfer {
+  id              String         @id @default(uuid())
+  idempotencyKey  String         @unique
+  sourceAccountId String
+  destAccountId   String
+  // Always positive; direction is implied by source/dest. In cents.
+  amount          BigInt
+  status          TransferStatus @default(COMPLETED)
+  description     String?
+  createdAt       DateTime       @default(now())
+  source          Account        @relation("TransferSource", fields: [sourceAccountId], references: [id])
+  dest            Account        @relation("TransferDest", fields: [destAccountId], references: [id])
+  transactions    Transaction[]
+
+  @@index([sourceAccountId, createdAt])
+  @@index([destAccountId, createdAt])
+}
+
+model Transaction {
+  id           String           @id @default(uuid())
+  accountId    String
+  account      Account          @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  transferId   String?
+  transfer     Transfer?        @relation(fields: [transferId], references: [id], onDelete: SetNull)
+  type         TransactionType
+  // Always positive; sign is implied by type. In cents.
+  amount       BigInt
+  // Account balance immediately after this entry — makes the ledger auditable.
+  balanceAfter BigInt
+  description  String           @default("")
+  category     String           @default("Uncategorized")
+  createdAt    DateTime         @default(now())
+  corrections  CategoryCorrection[]
+
+  @@index([accountId, createdAt])
+  @@index([category])
+}
+
+model CategoryCorrection {
+  id                String      @id @default(uuid())
+  userId            String
+  user              User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactionId     String
+  transaction       Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  originalCategory  String
+  correctedCategory String
+  // The description at correction time, used as few-shot context for future prompts.
+  description       String      @default("")
+  createdAt         DateTime    @default(now())
+
+  @@index([userId, createdAt])
+}
+
+enum TransferStatus {
+  COMPLETED
+  FAILED
+}
+
+enum TransactionType {
+  DEBIT
+  CREDIT
+}
