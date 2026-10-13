@@ -12,6 +12,10 @@ This document explains the key choices made while building this assessment, the 
 | **PostgreSQL + Prisma** | PostgreSQL is required. Prisma was chosen over TypeORM for its type-safe client, first-class migrations, and lower historical bug surface. Prisma's raw-SQL escape hatch (`$queryRaw`) is used where row-level locking is needed — Prisma's high-level API has no first-class `FOR UPDATE`. |
 | **Groq (`openai/gpt-oss-120b`)** | Any provider was allowed; Groq was chosen for its free tier and low latency, which keeps the post-commit categorization call fast. The OpenAI-compatible chat-completions shape makes swapping providers trivial (only the client constructor and model name change). |
 | **JWT auth (register/login) with refresh tokens** | Auth is not a focus of the assessment, but endpoints need to be addressable per-user for transfers and history. Access tokens are deliberately short-lived (15 minutes); the long-lived credential is an opaque, rotating, server-side-revocable refresh token (see §7). No roles, email verification, or password reset (intentionally omitted). |
+| **helmet** | Standard security headers (CSP, HSTS, frame-deny, no-referrer) cost one dependency and remove a whole class of misconfiguration. |
+| **@nestjs/throttler** | Per-route rate limiting on credential endpoints. The non-auth limit is deliberately generous: this API is meant to be hammered by concurrent test suites from a single IP, and a tight global cap rejects legitimate load and masks real results. |
+| **Docker (multi-stage) → Render + Neon** | Container runs as a non-root user with production dependencies only. Migrations and an idempotent demo seed run at container start, because Render's free tier has no shell. |
+| **Jest + Supertest** | End-to-end tests run against a real PostgreSQL database rather than mocks — concurrency guarantees cannot be meaningfully tested against a stub. |
 
 ---
 
@@ -82,7 +86,7 @@ A redundant correction (changing a category to what it already is) is ignored �
 
 ---
 
-## 6. Spending insights (Inspired By Cashew)
+## 6. Spending insights
 
 Insights are computed **on demand** with SQL aggregations, not pre-materialized. At this scale (hundreds to low-thousands of transactions per user) on-demand queries are fast and always correct; a materialized view or nightly job would add complexity and staleness risk for no benefit. This is a scope decision, not a scalability claim.
 

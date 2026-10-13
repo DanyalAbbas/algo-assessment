@@ -21,11 +21,41 @@ See [DECISIONS.md](./DECISIONS.md) for the engineering reasoning behind every si
 
 ## Tech stack
 
-- NestJS 11 + TypeScript
-- PostgreSQL 16 + Prisma 6
-- Groq (`openai/gpt-oss-120b`)
-- JWT auth (register/login) with bcrypt
-- Jest + Supertest for end-to-end tests
+| Layer | Technology | Version | Why |
+|---|---|---|---|
+| Runtime | Node.js | 22.x | Current LTS |
+| Language | TypeScript | 5.7 | Required by the brief; strict compiler options |
+| Framework | NestJS | 11 | Preferred in the brief; DI + modules give a clean separation between transfer, AI and insights concerns |
+| ORM | Prisma | 6.19 | Type-safe client, first-class migrations, `$queryRaw` escape hatch for the `SELECT … FOR UPDATE` row locks |
+| Database | PostgreSQL | 16 | Required. Row-level locking and transactional integrity are the backbone of the money movement |
+| Money type | `BIGINT` cents | — | Exact integer arithmetic; no floating-point drift in a ledger |
+| LLM | Groq (`openai/gpt-oss-120b`) | SDK 1.6 | Real LLM integration end-to-end; OpenAI-compatible so the provider is swappable |
+| Auth | JWT + Passport | 12 | Short-lived stateless access tokens |
+| Password hashing | bcryptjs | 3 | Pure JS — no native toolchain needed in the container |
+| Validation | class-validator / class-transformer | 0.15 | Declarative DTO validation; drives the global `ValidationPipe` |
+| Security headers | helmet | 8 | CSP, HSTS, frame-deny, no-referrer |
+| Rate limiting | @nestjs/throttler | 6 | Per-route limits on credential endpoints |
+| Testing | Jest + Supertest | 30 / 7 | End-to-end tests against a real PostgreSQL database, not mocks |
+| Container | Docker (multi-stage) | — | Non-root runtime image, production dependencies only |
+| Hosting | Render (free tier) + Neon PostgreSQL | — | Public URL with a managed database |
+
+**Design references.** Stripe's engineering blog was the main architectural reference:
+[*Ledger*](https://stripe.dev/blog/ledger-stripe-system-for-tracking-and-validating-money-movement) (double-entry, immutable money fields),
+[*Designing robust and predictable APIs with idempotency*](https://stripe.com/blog/idempotency) (client-key idempotency), and
+[*Stripe's payments APIs: the first 10 years*](https://stripe.dev/blog/payment-api-design) (predictable API contracts). See `DECISIONS.md`.
+
+---
+
+## Live deployment
+
+- **API:** `https://algo-assessment-api.onrender.com` (`GET /health` for a liveness check)
+- **Demo accounts:** `alice@example.com` / `bob@example.com`, password `password123`
+- **Deployment shape:** single Docker container on Render's free tier, against a managed PostgreSQL (Neon). Migrations and an idempotent demo seed run at container start.
+
+> **Notes for reviewers**
+> - The first request after ~15 minutes idle can take ~30–50s while the free instance wakes.
+> - The free tier has ~0.1 shared CPU, so **sustained bursts beyond ~20 concurrent requests may queue or fail**. Correctness is unaffected — global money conservation, no negative balances and exactly-once transfer semantics hold under all tested load. Please test with 10–20 concurrent requests.
+> - Categorization runs asynchronously; use `POST /transactions/:id/categorize` to force it synchronously.
 
 ---
 
@@ -224,16 +254,30 @@ curl -s localhost:3000/insights -H "Authorization: Bearer $ALICE" | jq
 
 ```
 src/
-  auth/            JWT auth (register/login), guards, decorators
+  auth/            JWT auth, rotating refresh tokens, guards, decorators
   accounts/        Account creation, listing, balances
-  transfers/       Transfer engine — idempotency, locking, atomic money movement
+  transfers/       Transfer engine — idempotency, row locking, atomic money movement
   transactions/    Transaction history (ledger queries)
-  categorization/  Groq LLM integration + category corrections (learning loop)
-  insights/        Monthly summary, categories, trend, anomalies
-  prisma/          Prisma service (global)
+  categorization/  Groq LLM integration, background worker, category corrections
+  insights/        Monthly summary, categories, trend, anomaly detection
+  prisma/          Prisma service (global, pool sizing)
 prisma/
-  schema.prisma    Data model (User, Account, Transfer, Transaction, CategoryCorrection)
+  schema.prisma    Data model (User, Account, Transfer, Transaction,
+                   CategoryCorrection, RefreshToken)
+  migrations/      Versioned SQL migrations
   seed.ts          Demo users (alice/bob) with funded accounts
 test/
-  transfers.e2e-spec.ts   Idempotency + concurrency + edge-case tests
+  transfers.e2e-spec.ts            Core transfer guarantees
+  transfers.regression.e2e-spec.ts Regression tests for reported defects
+  idempotency-key.e2e-spec.ts      Body vs header key precedence
+  async-categorization.e2e-spec.ts LLM off the money path
+  auth.e2e-spec.ts                 Session security + rotation
+  insights.e2e-spec.ts             Month-parameter validation
+  rate-limit.e2e-spec.ts           Throttling behaviour
+Dockerfile           Multi-stage build; migrations + seed run at container start
+render.yaml          Render blueprint (env vars are prompts at apply time)
 ```
+
+## Tests
+
+79 tests total — 15 unit (`npm test`) and 64 end-to-end across 7 suites (`npm run test:e2e`), running against a real PostgreSQL database rather than mocks. The e2e suite covers replay under concurrency, a 20-way overdraw race, payload-mismatch conflicts, unsafe-integer rejection, response-shape parity between first run and replay, refresh-token rotation, and IDOR/authorization boundaries.

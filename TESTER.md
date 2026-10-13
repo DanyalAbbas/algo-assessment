@@ -10,7 +10,15 @@ A fintech wallet API (NestJS + TypeScript + PostgreSQL + Prisma) with:
 - AI transaction categorization (Groq LLM) with user corrections that improve future categorization
 - Spending insights
 
-## Running it
+## Live instance
+
+A deployed instance is running at **https://algo-assessment-api.onrender.com** (health: `GET /health`). It uses the same seeded demo accounts. Two caveats when testing it:
+- The first request after ~15 min idle can take ~30-50s while the free instance wakes.
+- Free-tier CPU means sustained bursts beyond ~20 concurrent transfers may queue or fail. Correctness is unaffected; test with 10-20 concurrent.
+
+Running locally is preferable for load testing.
+
+## Running it locally
 
 ```bash
 npm install
@@ -38,7 +46,7 @@ All money/history endpoints require `Authorization: Bearer <accessToken>`.
 - Refresh token: **opaque 7-day token**, returned at login/register, rotated on every refresh
 - Login/register return: `{ accessToken, refreshToken, refreshTokenExpiresAt, user }`
 - The server **refuses to start** if `JWT_SECRET` is missing, <32 chars, or a known placeholder. If the app boots, the secret is non-default.
-- **Rate limiting is active.** Login/register allow 10 requests/min per IP (default); all other routes allow 100/min. Exceeding either returns **429**. If you hammer `/auth/login` while testing, you will be throttled — wait 60s or use a fresh IP.
+- **Rate limiting is active.** Login/register allow 60 requests/min per IP; all other routes allow 2000/min. Exceeding either returns **429**. The generous non-auth limit is deliberate — this API is meant to be exercised by concurrent test suites from a single IP, and a tight global cap would reject legitimate load and mask real results.
 - Login is timing-hardened: an unknown email takes the same time as a known one.
 
 | Method | Path | Body | Notes |
@@ -138,7 +146,11 @@ DATABASE_URL=postgresql://app:app@localhost:5432/algo_assessment_test npx prisma
 npm run test:e2e
 ```
 
-Tests (22 across 3 suites):
-- **Transfers:** replay, concurrent identical requests (10-way), concurrent distinct overdraw race (20-way), payload-mismatch 409, insufficient funds, self-transfer, missing key, non-owned source, header-based idempotency.
-- **Auth/session:** JWT secret fail-fast (missing / `dev-secret` / placeholder / high-entropy), sequential rotation chain, replay-after-rotation rejected, concurrent rotation compare-and-swap (exactly 1 winner of 10), invalid token rejected, logout revocation, counterparty-balance/userId non-disclosure (fresh + replay), own-account detail still present, cross-user idempotency-key probing.
-- **Rate limiting:** repeated failed logins return 429.
+Tests (64 across 7 e2e suites, plus 15 unit tests via `npm test`):
+- **transfers** — replay, concurrent identical requests (10-way), concurrent distinct overdraw race (20-way), payload-mismatch 409, insufficient funds, self-transfer, missing key, non-owned source, header-based idempotency.
+- **transfers.regression** — drained-source concurrent retry must replay (not 400), description as part of the payload, unsafe-integer rejection with no ledger writes, first-run vs replay shape parity, counterparty redaction on both paths.
+- **idempotency-key** — conflicting body/header keys rejected without side effects; matching, body-only and header-only accepted; mismatch rejected even when it would otherwise replay.
+- **async-categorization** — description-less transfers short-circuit to `Transfers`, transfers never block on the LLM, on-demand categorize endpoint, cross-user access refused.
+- **auth/session** — JWT secret fail-fast (missing / `dev-secret` / placeholder / high-entropy), sequential rotation chain, replay-after-rotation rejected, concurrent rotation compare-and-swap (exactly 1 winner of 10), invalid token rejected, logout revocation, counterparty-balance/userId non-disclosure.
+- **insights** — month-parameter format and range validation (valid months, `abc`, month `00`/`13`, January/December boundaries).
+- **rate-limit** — repeated failed logins return 429.
