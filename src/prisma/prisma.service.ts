@@ -12,20 +12,17 @@ import { PrismaClient } from '@prisma/client';
  *
  * Overridable with DATABASE_POOL_SIZE.
  */
-function poolSize(): number | undefined {
+function poolSize(): number {
   const raw = process.env.DATABASE_POOL_SIZE;
-  if (!raw) return undefined;
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? n : undefined;
+  const n = raw === undefined || raw === '' ? 10 : Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 10;
 }
 
 function withPoolSize(url: string | undefined): string | undefined {
   if (!url) return url;
-  const size = poolSize();
-  if (!size) return url;
   // Don't override an explicit limit already present in the URL.
   if (/[?&]connection_limit=/.test(url)) return url;
-  return `${url}${url.includes('?') ? '&' : '?'}connection_limit=${size}`;
+  return `${url}${url.includes('?') ? '&' : '?'}connection_limit=${poolSize()}`;
 }
 
 @Injectable()
