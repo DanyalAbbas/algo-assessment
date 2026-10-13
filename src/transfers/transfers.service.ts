@@ -38,6 +38,22 @@ function canonicalPayload(dto: CreateTransferDto) {
   };
 }
 
+/**
+ * True for failures that happen BEFORE any money moved: the transaction never
+ * started (pool exhaustion, wait timeout, transient connection loss). These
+ * are safe to retry because the whole unit of work is one DB transaction that
+ * either commits or rolls back.
+ */
+function isRetryable(err: unknown): boolean {
+  const msg = String((err as Error)?.message ?? err);
+  return (
+    /Unable to start a transaction/i.test(msg) ||
+    /Timed out fetching a new connection/i.test(msg) ||
+    /maxWait|Timeout expired/i.test(msg) ||
+    /P1008|P2024|P2034/.test(msg)
+  );
+}
+
 export interface TransferResult {
   transfer: any;
   replayed: boolean;
@@ -75,6 +91,7 @@ export class TransfersService {
     userId: string,
     dto: CreateTransferDto,
     idempotencyKey: string,
+    attempt = 0,
   ): Promise<TransferResult> {
     if (dto.sourceAccountId === dto.destAccountId) {
       throw new BadRequestException('Cannot transfer to the same account');
@@ -219,10 +236,22 @@ export class TransfersService {
             },
           };
         },
-        // Bound lock contention; generous enough for bursts of concurrent transfers.
-        { timeout: 15_000 },
+        // `maxWait` governs how long a request may wait to ACQUIRE a
+        // connection before giving up. Prisma's default is only 2s, which a
+        // burst of concurrent transfers reliably exceeds — the request then
+        // fails with a 500 even though no money had moved. Queuing for longer
+        // is the correct behaviour; the transaction itself is still bounded by
+        // `timeout`.
+        { timeout: 15_000, maxWait: 20_000 },
       );
     } catch (err) {
+      // A transaction that could not even START (pool exhaustion / wait
+      // timeout) has moved no money and written nothing, so re-running it is
+      // atomic and safe. Retry briefly before surfacing a failure.
+      if (isRetryable(err) && attempt < 2) {
+        await new Promise((r) => setTimeout(r, 150 * (attempt + 1)));
+        return this.execute(userId, dto, idempotencyKey, attempt + 1);
+      }
       // Concurrent duplicate that did NOT share an account lock (different
       // source/destination rows), so both transactions ran the re-check above
       // before either committed and both raced to insert. The loser hits the

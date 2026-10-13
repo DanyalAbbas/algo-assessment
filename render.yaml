@@ -31,6 +31,10 @@ services:
         value: 15m
       - key: REFRESH_TOKEN_EXPIRES_IN
         value: 7d
+      # Explicit connection pool: Prisma would otherwise derive a tiny pool
+      # from a small instance's CPU count and fail bursts with 500s.
+      - key: DATABASE_POOL_SIZE
+        value: "10"
       - key: LLM_TIMEOUT_MS
         value: "5000"
       - key: LLM_CONCURRENCY
