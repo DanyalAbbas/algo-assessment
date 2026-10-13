@@ -20,7 +20,8 @@ FROM node:22-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
-# Production dependencies only.
+# Production dependencies only. The Prisma CLI is a runtime dependency here
+# because migrations run at container start.
 COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
@@ -35,4 +36,9 @@ EXPOSE 3000
 
 # The app binds to 0.0.0.0 so the platform's router can reach it.
 ENV PORT=3000
-CMD ["node", "dist/main.js"]
+
+# Migrations and the idempotent demo seed run at container start. Render's
+# free tier has no shell, so this is the only place they can run — doing it
+# here makes a deploy self-contained. `migrate deploy` is a no-op when the
+# schema is already current, and the seed uses upserts, so restarts are safe.
+CMD ["sh", "-c", "npx prisma migrate deploy && node dist/prisma/seed.js && node dist/src/main.js"]

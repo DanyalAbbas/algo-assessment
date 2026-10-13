@@ -1,4 +1,9 @@
 {
   "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Pin the output root so both src/ and prisma/seed.ts compile to a
+    // predictable layout: dist/src/main.js and dist/prisma/seed.js.
+    "rootDir": "."
+  },
   "exclude": ["node_modules", "test", "dist", "**/*spec.ts"]
 }
