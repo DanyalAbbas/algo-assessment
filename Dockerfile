@@ -38,7 +38,11 @@ EXPOSE 3000
 ENV PORT=3000
 
 # Migrations and the idempotent demo seed run at container start. Render's
-# free tier has no shell, so this is the only place they can run — doing it
-# here makes a deploy self-contained. `migrate deploy` is a no-op when the
-# schema is already current, and the seed uses upserts, so restarts are safe.
-CMD ["sh", "-c", "npx prisma migrate deploy && node dist/prisma/seed.js && node dist/src/main.js"]
+# free tier has no shell, so this is the only place they can run.
+#
+# `migrate deploy` takes a Postgres advisory lock with a 10s timeout. When the
+# database is cold (a managed Postgres that suspends after inactivity) that
+# lock can time out and kill the container, so we retry it before giving up.
+# The app starts regardless: a transient migrate failure should degrade, not
+# take the service down.
+CMD ["sh", "-c", "for i in 1 2 3 4 5; do npx prisma migrate deploy && break; echo 'migrate failed, retrying...'; sleep 8; done; node dist/prisma/seed.js; node dist/src/main.js"]
